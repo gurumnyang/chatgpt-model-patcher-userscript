@@ -1,144 +1,127 @@
 // ==UserScript==
-// @name         sora 요청 복사기
-// @namespace    local.dev.tools
-// @version      1.0.0
-// @description
-// @match        https://sora.chatgpt.com/*
+// @name         ChatGPT model patcher
+// @version      0.1.0
+// @description  좌하단 드롭다운으로 모델을 고르고, /backend-api/conversation 요청의 body.model만 바꿉니다.
+// @match        https://chatgpt.com/*
+// @match        https://www.chatgpt.com/*
 // @run-at       document-start
-// @inject-into  page
 // @grant        none
 // @updateURL   https://raw.githubusercontent.com/gurumnyang/chatgpt-model-patcher-userscript/main/model-patcher.user.js
 // @downloadURL https://raw.githubusercontent.com/gurumnyang/chatgpt-model-patcher-userscript/main/model-patcher.user.js
 // ==/UserScript==
 
-(() => {
+
+
+//ChatGPT로 생성된 코드
+//인간 개발자의 검토를 거쳤습니다.
+(function () {
   'use strict';
 
-  const TARGET_URL = '/backend/video_gen';
+  const KEY = 'cgpt_forced_model';
+  const MODELS = ['gpt-5', 'gpt-5-t-mini','gpt-5-thinking', 'gpt-4.1', 'gpt-4o', 'o3','o4-mini'];
+  let forced = localStorage.getItem(KEY) || MODELS[0];
 
-  const LS_KEY_ENABLED = 'reqdup_enabled';
-  const LS_KEY_COUNT   = 'reqdup_count';
-
-  let enabled = localStorage.getItem(LS_KEY_ENABLED);
-  enabled = enabled === null ? 'true' : enabled;
-  let dupCount = parseInt(localStorage.getItem(LS_KEY_COUNT) || '0', 10);
-  if (Number.isNaN(dupCount) || dupCount < 0) dupCount = 0;
-  if (dupCount > 10) dupCount = 10;
-
-  const origFetch = window.fetch;
-
-  // fetch 가로채기
-  window.fetch = new Proxy(origFetch, {
-    apply: function (target, thisArg, args) {
+  if (!window.__cgpt_model_hook__) {
+    const prevFetch = window.fetch;
+    window.fetch = async function (input, init) {
       try {
-        // 요청 정보 파싱
-        const input = args[0];
-        const init  = args[1] || {};
-        let url, method;
+        const url = input instanceof Request ? input.url : String(input);
+        const u = new URL(url, location.href);
 
-        if (input instanceof Request) {
-          url = input.url;
-          method = input.method || 'GET';
-        } else {
-          url = String(input);
-          method = (init && init.method) ? String(init.method) : 'GET';
+        if (
+          u.origin === location.origin &&
+          (u.pathname === '/backend-api/conversation' || u.pathname === '/backend-api/f/conversation') &&
+          u.search === ''
+        ) {
+          if (input instanceof Request) {
+            const txt = await input.clone().text();
+            const patched = patch(txt, forced);
+            if (patched) return prevFetch(new Request(input, { body: patched }));
+            return prevFetch(input);
+          } else {
+            const opts = init || {};
+            if (opts.body) {
+              const txt = await new Response(opts.body).text();
+              const patched = patch(txt, forced);
+              if (patched) return prevFetch(url, { ...opts, body: patched });
+            }
+            return prevFetch(input, init);
+          }
         }
-
-        // 대상 판단
-        const isTarget =
-          enabled === 'true' &&
-          method.toUpperCase() === 'POST' &&
-          url.startsWith(TARGET_URL);
-
-        if (!isTarget) {
-          // 원래대로 진행
-          return Reflect.apply(target, thisArg, args);
-        }
-
-        const baseReq =
-          input instanceof Request
-            ? input.clone()
-            : new Request(url, init);
-
-        const primaryPromise = origFetch(baseReq.clone());
-
-        for (let i = 0; i < dupCount; i++) {
-          origFetch(baseReq.clone())
-            .then(() => {
-            })
-            .catch((err) => {
-              console.warn('[req-dup] 추가 전송 실패:', err);
-            });
-        }
-
-        return primaryPromise;
-      } catch (e) {
-        console.warn('[req-dup] 훅 처리 중 오류:', e);
-        return Reflect.apply(target, thisArg, args);
+        return prevFetch(input, init);
+      } catch {
+        return prevFetch(input, init);
       }
+    };
+    window.__cgpt_model_hook__ = true;
+  }
+
+  function patch(text, model) {
+    if (!text) return null;
+    try {
+      const j = JSON.parse(text);
+      if (j && typeof j === 'object') {
+        j.model = model;
+        return JSON.stringify(j);
+      }
+    } catch {}
+    return null;
+  }
+
+  // --- 초간단 UI(좌하단 드롭다운 + 현재값 표시) ---
+  function ui() {
+    if (document.getElementById('cgpt-model-dd')) return;
+
+    const box = document.createElement('div');
+    box.id = 'cgpt-model-dd';
+    Object.assign(box.style, {
+      position: 'fixed', left: '12px', bottom: '12px', zIndex: 2147483647,
+      background: 'rgba(0,0,0,.72)', color: '#fff', padding: '8px', borderRadius: '10px',
+      font: '12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'
+    });
+
+    const sel = document.createElement('select');
+    Object.assign(sel.style, {
+      background: 'rgba(255,255,255,.1)', color: '#fff', border: '1px solid rgba(255,255,255,.3)',
+      borderRadius: '8px', padding: '4px 8px', marginRight: '6px'
+    });
+    MODELS.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m; o.textContent = m;
+      Object.assign(o.style,{
+          color: "#222",
+      });
+      sel.appendChild(o);
+
+    });
+    if (!MODELS.includes(forced)) {
+      const o = document.createElement('option');
+      o.value = forced; o.textContent = forced; sel.appendChild(o);
     }
-  });
+    sel.value = forced;
+    sel.onchange = () => {
+      forced = sel.value;
+      try { localStorage.setItem(KEY, forced); } catch {}
+      badge.textContent = forced;
+    };
 
-  // 간단한 UI 생성
-  function buildPanel() {
-    const panel = document.createElement('div');
-    panel.id = 'req-dup-panel';
-    panel.style.position = 'fixed';
-    panel.style.left = '16px';
-    panel.style.bottom = '16px';
-    panel.style.zIndex = '2147483647';
-    panel.style.background = 'rgba(20,20,20,0.85)';
-    panel.style.color = '#fff';
-    panel.style.fontSize = '12px';
-    panel.style.padding = '10px 12px';
-    panel.style.borderRadius = '8px';
-    panel.style.boxShadow = '0 2px 10px rgba(0,0,0,0.35)';
-    panel.style.userSelect = 'none';
-    panel.style.backdropFilter = 'blur(4px)';
-
-    panel.innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-          <input type="checkbox" id="reqdup-enabled" ${enabled === 'true' ? 'checked' : ''} />
-          <span>복제 전송 활성</span>
-        </label>
-      </div>
-      <div style="margin-top:8px;display:flex;align-items:center;gap:8px;">
-        <span>추가 전송:</span>
-        <input type="number" id="reqdup-count" min="0" max="7" step="1"
-               value="${dupCount}"
-               style="width:56px;padding:2px 4px;border-radius:4px;border:1px solid #444;background:#111;color:#fff;" />
-        <span>회</span>
-      </div>
-      <div style="margin-top:6px;opacity:0.8;">대상 URL: <code style="opacity:0.9">${TARGET_URL}</code></div>
-    `;
-
-    document.documentElement.appendChild(panel);
-
-    const enabledEl = panel.querySelector('#reqdup-enabled');
-    const countEl   = panel.querySelector('#reqdup-count');
-
-    enabledEl.addEventListener('change', () => {
-      enabled = enabledEl.checked ? 'true' : 'false';
-      localStorage.setItem(LS_KEY_ENABLED, enabled);
+    const badge = document.createElement('span');
+    badge.textContent = forced;
+    Object.assign(badge.style, {
+      border: '1px solid rgba(255,255,255,.3)', borderRadius: '999px',
+      padding: '2px 8px', background: 'rgba(255,255,255,.08)', fontWeight: 600
     });
 
-    countEl.addEventListener('change', () => {
-      let v = parseInt(countEl.value || '0', 10);
-      if (Number.isNaN(v) || v < 0) v = 0;
-      if (v > 10) v = 10;
-      dupCount = v;
-      countEl.value = String(dupCount);
-      localStorage.setItem(LS_KEY_COUNT, String(dupCount));
-    });
+    box.appendChild(sel);
+    box.appendChild(badge);
+    document.documentElement.appendChild(box);
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', buildPanel, { once: true });
+    document.addEventListener('DOMContentLoaded', ui, { once: true });
   } else {
-    buildPanel();
+    ui();
   }
-
-  // 안내 로그
-  console.log('[req-dup] 활성화됨. 대상:', TARGET_URL);
+  // SPA 보정(간단 유지)
+  setInterval(() => { if (!document.getElementById('cgpt-model-dd')) ui(); }, 3000);
 })();
